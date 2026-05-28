@@ -503,6 +503,69 @@ async function validateSavedToken(token) {
   return data;
 }
 
+
+function getCurrentMonthKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function getPrevMonthLabel(monthKey) {
+  const [y, m] = String(monthKey || getCurrentMonthKey()).split("-").map(Number);
+  const d = new Date(y, (m || 1) - 2, 1);
+  return `${d.getMonth() + 1}월`;
+}
+
+async function fetchMonthlyReport({ token, hospitalId, month }) {
+  const data = await gasJsonp("monthlyReport", {
+    token: token || "",
+    hospitalId: hospitalId || "reto",
+    month: month || getCurrentMonthKey(),
+  });
+  if (!data?.ok) throw new Error(data?.error || "월간 리포트를 불러오지 못했습니다.");
+  return data.report || data;
+}
+
+function emptyMonthlyReport(authUser, monthKey) {
+  const [year, month] = String(monthKey || getCurrentMonthKey()).split("-");
+  return {
+    month: `${year}년 ${Number(month)}월`,
+    monthKey: monthKey || getCurrentMonthKey(),
+    prevMonth: getPrevMonthLabel(monthKey),
+    hospital: authUser?.name || "리투의원",
+    manager: "박원준",
+    staff: "-",
+    staffNote: "아직 보고 데이터 없음",
+    kpi: [
+      { label: "방문 횟수", value: "0", sub: "아직 제출된 보고 없음" },
+      { label: "정시 출근", value: "0 / 0", sub: "기준: 오전 9:30 전" },
+      { label: "처리 요청", value: "0", sub: "요청 연동 전" },
+      { label: "증빙 사진", value: "0", sub: "정기+필수 사진 합계" },
+    ],
+    calendar: buildEmptyCalendar(Number(year), Number(month)),
+    regularPoints: SITE.regularPoints.map((p) => ({
+      name: p.text,
+      icon: p.icon,
+      visits: 0,
+      photos: 0,
+    })),
+    requests: [],
+    galleries: [],
+    comment: "아직 이 월에 제출된 작업 보고가 없습니다. 직원 앱에서 보고서를 제출하면 이 화면에 방문 횟수, 정시 출근, 사진 수, 캘린더가 자동으로 표시됩니다.",
+    nextMonth: ["작업자 보고서 제출 후 자동 집계 확인", "관리자 코멘트 입력 기능은 다음 단계에서 연결"],
+    _empty: true,
+  };
+}
+
+function buildEmptyCalendar(year, month) {
+  const dayOrder = ["일", "월", "화", "수", "목", "금", "토"];
+  const last = new Date(year, month, 0).getDate();
+  return Array.from({ length: last }).map((_, i) => {
+    const d = i + 1;
+    const date = new Date(year, month - 1, d);
+    return { d, w: dayOrder[date.getDay()], s: "off" };
+  });
+}
+
 async function submitDailyReport(payload) {
   // v6 FINAL: hidden form POST 방식
   // 이유: Apps Script Web App은 리다이렉트/CORS 때문에 fetch no-cors가 브라우저에서 조용히 실패할 수 있습니다.
@@ -2356,7 +2419,7 @@ function HospitalApp({ onExit, authUser }) {
         {tab === "home" && <HospHome setTab={setTab} />}
         {tab === "request" && <HospNewRequest setTab={setTab} />}
         {tab === "mine" && <HospMyRequests setTab={setTab} />}
-        {tab === "report" && <HospMonthlyReport />}
+        {tab === "report" && <HospMonthlyReport authUser={authUser} />}
       </main>
 
       {/* 하단 탭 */}
@@ -2694,7 +2757,41 @@ function HospMyRequests() {
 /* ─────────────────────────────────────────────
    ▒ 월간 보고서 ▒  (핵심 자산)
    ───────────────────────────────────────────── */
-function HospMonthlyReport() {
+function HospMonthlyReport({ authUser }) {
+  const [monthKey, setMonthKey] = useState(getCurrentMonthKey());
+  const [report, setReport] = useState(() => emptyMonthlyReport(authUser, getCurrentMonthKey()));
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadReport = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const data = await fetchMonthlyReport({
+        token: authUser?.token,
+        hospitalId: authUser?.linkedId || "reto",
+        month: monthKey,
+      });
+      setReport({ ...emptyMonthlyReport(authUser, monthKey), ...data });
+    } catch (err) {
+      setError(err.message || "월간 리포트 연결에 실패했습니다.");
+      setReport(emptyMonthlyReport(authUser, monthKey));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadReport();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monthKey, authUser?.token, authUser?.linkedId]);
+
+  const goMonth = (diff) => {
+    const [y, m] = monthKey.split("-").map(Number);
+    const d = new Date(y, m - 1 + diff, 1);
+    setMonthKey(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  };
+
   return (
     <div className="bg-white">
       {/* 월 선택 */}
@@ -2707,30 +2804,57 @@ function HospMonthlyReport() {
             MONTHLY HYGIENE REPORT
           </div>
           <div className="text-lg font-black mt-0.5" style={{ color: KB.navy, letterSpacing: "-0.02em" }}>
-            {REPORT.month}
+            {report.month}
           </div>
         </div>
-        <button
-          style={{ background: "#fff", border: `1px solid ${KB.line}`, color: KB.navy }}
-          className="px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1"
-        >
-          {REPORT.prevMonth} 비교 <ChevronRight size={14} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => goMonth(-1)}
+            style={{ background: "#fff", border: `1px solid ${KB.line}`, color: KB.navy }}
+            className="px-2 py-2 rounded-lg text-xs font-bold"
+          >
+            이전
+          </button>
+          <button
+            onClick={() => goMonth(1)}
+            style={{ background: "#fff", border: `1px solid ${KB.line}`, color: KB.navy }}
+            className="px-2 py-2 rounded-lg text-xs font-bold"
+          >
+            다음
+          </button>
+        </div>
       </div>
 
-      <ReportCover />
-      <ReportKPI />
-      <ReportCalendar />
-      <ReportRegularPoints />
-      <ReportRequestHistory />
-      <ReportGallery />
-      <ReportManagerComment />
-      <ReportDownload />
+      {loading && (
+        <div style={{ background: KB.goldMute, color: KB.navy }} className="px-5 py-3 text-xs font-bold">
+          구글시트 실제 작업기록을 불러오는 중입니다...
+        </div>
+      )}
+      {error && (
+        <div style={{ background: KB.badSoft, color: KB.bad }} className="px-5 py-3 text-xs font-bold leading-relaxed">
+          리포트 API 연결 전이거나 배포가 아직 반영되지 않았습니다.<br />{error}
+        </div>
+      )}
+      {!loading && !error && (
+        <div style={{ background: KB.okSoft, color: KB.ok }} className="px-5 py-3 text-xs font-black">
+          실제 구글시트 작업기록 기준으로 집계되었습니다.
+        </div>
+      )}
+
+      <ReportCover report={report} />
+      <ReportKPI report={report} />
+      <ReportCalendar report={report} />
+      <ReportRegularPoints report={report} />
+      <ReportRequestHistory report={report} />
+      <ReportGallery report={report} />
+      <ReportManagerComment report={report} />
+      <ReportDownload report={report} onRefresh={loadReport} />
     </div>
   );
 }
 
-function ReportCover() {
+function ReportCover({ report }) {
+  const REPORT = report || emptyMonthlyReport(null, getCurrentMonthKey());
   return (
     <section
       style={{
@@ -2786,12 +2910,13 @@ function ReportCover() {
   );
 }
 
-function ReportKPI() {
+function ReportKPI({ report }) {
+  const REPORT = report || emptyMonthlyReport(null, getCurrentMonthKey());
   return (
     <section className="px-5 py-7">
       <SectionHeader tag="이번 달 한눈에" title="핵심 지표" />
       <div className="grid grid-cols-2 gap-3">
-        {REPORT.kpi.map((k) => (
+        {(REPORT.kpi || []).map((k) => (
           <div
             key={k.label}
             style={{ background: "#fff", border: `1px solid ${KB.line}` }}
@@ -2819,7 +2944,8 @@ function ReportKPI() {
   );
 }
 
-function ReportCalendar() {
+function ReportCalendar({ report }) {
+  const REPORT = report || emptyMonthlyReport(null, getCurrentMonthKey());
   const [pick, setPick] = useState(null);
 
   // 첫 주에 빈 칸 채우기 (1일이 토요일이라고 가정 — 데이터에 맞춰)
@@ -2851,7 +2977,7 @@ function ReportCalendar() {
           {Array.from({ length: blanks }).map((_, i) => (
             <div key={"b" + i} />
           ))}
-          {REPORT.calendar.map((c) => {
+          {(REPORT.calendar || []).map((c) => {
             const s = statusColor(c.s);
             const isVisit = c.s === "visit" || c.s === "warn" || c.s === "extra";
             return (
@@ -2873,9 +2999,9 @@ function ReportCalendar() {
         </div>
 
         <div className="mt-4 grid grid-cols-2 gap-2 text-[11px]">
-          <LegendDot color={KB.navy} label="정시 방문 12회" />
-          <LegendDot color={KB.gold} label="추가 방문 1회" />
-          <LegendDot color={KB.warn} label="특이사항 1일" />
+          <LegendDot color={KB.navy} label={`정시 방문 ${REPORT.onTimeCount ?? 0}회`} />
+          <LegendDot color={KB.gold} label={`방문 ${REPORT.visitCount ?? 0}회`} />
+          <LegendDot color={KB.warn} label={`특이사항 ${REPORT.warnCount ?? 0}일`} />
           <LegendDot color={KB.line} label="비번일" border />
         </div>
       </div>
@@ -2887,15 +3013,15 @@ function ReportCalendar() {
         >
           <div className="flex items-center justify-between">
             <div className="font-black" style={{ color: KB.navy }}>
-              11월 {pick.d}일 ({pick.w}요일)
+              {REPORT.month?.split(" ")?.[1] || ""} {pick.d}일 ({pick.w}요일)
             </div>
             <Pill tone={pick.s === "warn" ? "warn" : "navy"}>
               {statusColor(pick.s).label}
             </Pill>
           </div>
           <div className="mt-2 text-xs space-y-1" style={{ color: KB.inkSoft }}>
-            <div>· 08:35 도착 / 10:12 종료</div>
-            <div>· 정기 점검 7/7 완료 · 사진 11장</div>
+            <div>· {pick.clockIn || "-"} 도착 / {pick.clockOut || "-"} 종료</div>
+            <div>· 정기 점검 {pick.checkDone || "-"} 완료 · 사진 {pick.photoCount ?? 0}장</div>
             {pick.s === "warn" && (
               <div style={{ color: KB.warn }} className="font-bold">
                 · 파우더룸 컴플레인 발생 → 다음날 처리 완료
@@ -2923,7 +3049,8 @@ function LegendDot({ color, label, border }) {
   );
 }
 
-function ReportRegularPoints() {
+function ReportRegularPoints({ report }) {
+  const REPORT = report || emptyMonthlyReport(null, getCurrentMonthKey());
   return (
     <section className="px-5 py-7">
       <SectionHeader
@@ -2931,7 +3058,7 @@ function ReportRegularPoints() {
         title="병원 요청 항목 점검 현황"
       />
       <div className="space-y-2">
-        {REPORT.regularPoints.map((p) => (
+        {(REPORT.regularPoints || []).map((p) => (
           <div
             key={p.name}
             style={{
@@ -2977,7 +3104,8 @@ function ReportRegularPoints() {
   );
 }
 
-function ReportRequestHistory() {
+function ReportRequestHistory({ report }) {
+  const REPORT = report || emptyMonthlyReport(null, getCurrentMonthKey());
   return (
     <section className="px-5 py-7" style={{ background: KB.bg }}>
       <SectionHeader
@@ -2985,7 +3113,12 @@ function ReportRequestHistory() {
         title="이번 달 처리 내역"
       />
       <div className="space-y-4">
-        {REPORT.requests.map((r) => (
+        {(!REPORT.requests || REPORT.requests.length === 0) && (
+          <div style={{ background: "#fff", border: `1px solid ${KB.line}` }} className="rounded-2xl p-5 text-sm font-bold" >
+            이번 달 등록된 요청·컴플레인이 없습니다.
+          </div>
+        )}
+        {(REPORT.requests || []).map((r) => (
           <RequestReportCard key={r.id} r={r} />
         ))}
       </div>
@@ -3109,7 +3242,8 @@ function PhotoSlot({ label, tone }) {
   );
 }
 
-function ReportGallery() {
+function ReportGallery({ report }) {
+  const REPORT = report || emptyMonthlyReport(null, getCurrentMonthKey());
   return (
     <section className="px-5 py-7">
       <SectionHeader
@@ -3117,7 +3251,12 @@ function ReportGallery() {
         title="같은 앵글, 4주간 변화"
       />
       <div className="space-y-4">
-        {REPORT.galleries.map((g) => (
+        {(!REPORT.galleries || REPORT.galleries.length === 0) && (
+          <div style={{ background: KB.bg, border: `1px solid ${KB.line}` }} className="rounded-2xl p-5 text-sm font-bold" >
+            아직 표시할 사진 링크가 없습니다. 작업자 보고서에 사진 URL이 저장되면 여기에 자동 표시됩니다.
+          </div>
+        )}
+        {(REPORT.galleries || []).map((g) => (
           <div key={g.key}>
             <div className="flex items-center gap-2 mb-2">
               <span className="text-lg">{g.icon}</span>
@@ -3126,25 +3265,49 @@ function ReportGallery() {
               </span>
             </div>
             <div className="grid grid-cols-4 gap-1.5">
-              {g.photos.map((w) => (
-                <div
-                  key={w}
-                  style={{
-                    background: `linear-gradient(135deg, ${KB.goldMute} 0%, #fff 100%)`,
-                    border: `1px solid ${KB.line}`,
-                    aspectRatio: "3 / 4",
-                  }}
-                  className="rounded-lg flex flex-col items-center justify-center"
-                >
-                  <Camera size={16} color={KB.inkMute} />
-                  <div
-                    className="mt-1 text-[9px] font-black"
-                    style={{ color: KB.inkSoft, letterSpacing: "0.1em" }}
+              {g.photos.map((w, idx) => {
+                const photoLabel = typeof w === "string" ? w : w?.label || `사진 ${idx + 1}`;
+                const photoUrl = typeof w === "string" ? "" : w?.url || "";
+                const content = (
+                  <>
+                    <Camera size={16} color={KB.inkMute} />
+                    <div
+                      className="mt-1 text-[9px] font-black text-center px-1"
+                      style={{ color: KB.inkSoft, letterSpacing: "0.1em" }}
+                    >
+                      {photoLabel}
+                    </div>
+                  </>
+                );
+                return photoUrl ? (
+                  <a
+                    key={photoUrl + idx}
+                    href={photoUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      background: `linear-gradient(135deg, ${KB.goldMute} 0%, #fff 100%)`,
+                      border: `1px solid ${KB.line}`,
+                      aspectRatio: "3 / 4",
+                    }}
+                    className="rounded-lg flex flex-col items-center justify-center"
                   >
-                    {w}
+                    {content}
+                  </a>
+                ) : (
+                  <div
+                    key={photoLabel + idx}
+                    style={{
+                      background: `linear-gradient(135deg, ${KB.goldMute} 0%, #fff 100%)`,
+                      border: `1px solid ${KB.line}`,
+                      aspectRatio: "3 / 4",
+                    }}
+                    className="rounded-lg flex flex-col items-center justify-center"
+                  >
+                    {content}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         ))}
@@ -3153,7 +3316,8 @@ function ReportGallery() {
   );
 }
 
-function ReportManagerComment() {
+function ReportManagerComment({ report }) {
+  const REPORT = report || emptyMonthlyReport(null, getCurrentMonthKey());
   return (
     <section className="px-5 py-7" style={{ background: KB.bg }}>
       <SectionHeader
@@ -3200,7 +3364,7 @@ function ReportManagerComment() {
           📅 다음 달 강화 포인트
         </div>
         <div className="space-y-2">
-          {REPORT.nextMonth.map((n, i) => (
+          {(REPORT.nextMonth || []).map((n, i) => (
             <div
               key={i}
               style={{ background: "#fff", border: `1px solid ${KB.line}` }}
@@ -3223,7 +3387,8 @@ function ReportManagerComment() {
   );
 }
 
-function ReportDownload() {
+function ReportDownload({ report, onRefresh }) {
+  const REPORT = report || emptyMonthlyReport(null, getCurrentMonthKey());
   return (
     <section className="px-5 py-8">
       <div
@@ -3256,6 +3421,7 @@ function ReportDownload() {
             PDF로 저장하기
           </button>
           <button
+            onClick={onRefresh}
             style={{
               background: "transparent",
               border: "1.5px solid rgba(255,255,255,0.3)",
@@ -3263,7 +3429,7 @@ function ReportDownload() {
             className="w-full rounded-xl py-3.5 font-bold text-sm flex items-center justify-center gap-2 text-white"
           >
             <Send size={16} />
-            이메일로 받기
+            구글시트 다시 불러오기
           </button>
         </div>
       </div>
