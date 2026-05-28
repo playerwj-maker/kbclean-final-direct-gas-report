@@ -402,7 +402,7 @@ function buildDailyReportPayload(state, authUser = null) {
 }
 
 
-const GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwN-ADnmJbXZOrFXi5H-OeX58ihsJd_RbTXcQOw84-A4lCgmpYI2EwssAVhQwQEEBbT/exec";
+const GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbySTPIIjF5nyB9YvJIhtr1UbW36mPwGIpVNX7xNOoSZDbXd40MJe_b1cyv3MXBnEwYm/exec";
 const AUTH_STORAGE_KEY = "kbclean_auth_v1";
 
 function appRoleFromAccountRole(role) {
