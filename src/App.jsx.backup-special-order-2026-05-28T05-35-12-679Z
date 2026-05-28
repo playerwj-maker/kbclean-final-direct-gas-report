@@ -1029,23 +1029,6 @@ function StepChecklist({ state, update, onNext }) {
   ).length;
   const total = SITE.regularPoints.length;
 
-  // special-order-required-v1
-  // 오늘의 특별 작업지시는 모두 클릭/확인해야 다음 단계로 넘어갈 수 있습니다.
-  const orderDoneCount = SITE.todayOrders.filter(
-    (o) => state.checks[`order_${o.id}`]?.done
-  ).length;
-  const orderTotal = SITE.todayOrders.length;
-  const allOrdersDone = orderTotal === 0 || orderDoneCount === orderTotal;
-  const canGoNext = allOrdersDone;
-
-  const handleNext = () => {
-    if (!allOrdersDone) {
-      alert(`오늘의 특별 작업지시를 모두 확인해야 다음 단계로 넘어갈 수 있습니다. (${orderDoneCount}/${orderTotal})`);
-      return;
-    }
-    onNext();
-  };
-
   return (
     <div>
       <StepHeader
@@ -1191,18 +1174,11 @@ function StepChecklist({ state, update, onNext }) {
       </div>
 
       <div className="mt-8">
-        <BigButton onClick={handleNext} disabled={!canGoNext} icon={ArrowRight}>
-          {canGoNext
-            ? "다음 — 필수 사진 단계로"
-            : `특별 작업지시 확인 필요 (${orderDoneCount}/${orderTotal})`}
+        <BigButton onClick={onNext} icon={ArrowRight}>
+          다음 — 필수 사진 단계로
         </BigButton>
-        <div
-          className="text-center mt-2 text-xs font-bold"
-          style={{ color: canGoNext ? KB.inkMute : KB.bad }}
-        >
-          {canGoNext
-            ? "정기 점검 항목은 사진 촬영이 완료된 항목만 체크됩니다"
-            : "오늘의 특별 작업지시를 모두 클릭해야 다음 단계로 이동할 수 있습니다."}
+        <div className="text-center mt-2 text-xs" style={{ color: KB.inkMute }}>
+          정기 점검 항목은 사진 촬영이 완료된 항목만 체크됩니다
         </div>
       </div>
     </div>
