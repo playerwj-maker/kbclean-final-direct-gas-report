@@ -349,7 +349,7 @@ function imageFileToCompressedDataUrl(file, maxSize = 1400, quality = 0.76) {
   });
 }
 
-function buildDailyReportPayload(state) {
+function buildDailyReportPayload(state, authUser = null) {
   const checklist = SITE.regularPoints.map((point) => ({
     id: point.id,
     label: point.text,
@@ -382,8 +382,9 @@ function buildDailyReportPayload(state) {
     appVersion: "kbclean-final-form-post-v1",
     submittedAt: new Date().toISOString(),
     site: SITE,
-    staff: SITE.staff,
+    staff: authUser?.name || SITE.staff,
     manager: SITE.manager,
+    account: authUser ? { role: authUser.role, loginId: authUser.loginId, linkedId: authUser.linkedId } : null,
     clockInAt: state.clockInAt || "",
     clockOutAt: state.clockOutAt || "",
     checklist,
@@ -400,7 +401,107 @@ function buildDailyReportPayload(state) {
   };
 }
 
-const GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwYOKtSWXCtLK2a0x4OmBiP6mUDi-sn8vbZsfuvTHZFS0GZsPDCdPdKx0kPO-rnotQq/exec";
+
+const GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwBPnr9ZcqMG1uLoYkttSgi1BoNRVNPW5RQU20DeEKrojSa_9nbeJkGy5puVwvbb1kC/exec";
+const AUTH_STORAGE_KEY = "kbclean_auth_v1";
+
+function appRoleFromAccountRole(role) {
+  if (role === "worker") return "work";
+  if (role === "hospital") return "hospital";
+  if (role === "admin") return "admin";
+  return null;
+}
+
+function accountRoleFromAppRole(appRole) {
+  if (appRole === "work") return "worker";
+  if (appRole === "hospital") return "hospital";
+  if (appRole === "admin") return "admin";
+  return appRole;
+}
+
+function roleLabel(role) {
+  const map = {
+    worker: "직원",
+    hospital: "병원",
+    admin: "관리자",
+    work: "직원",
+  };
+  return map[role] || role || "사용자";
+}
+
+function safeReadAuth() {
+  try {
+    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveAuth(auth) {
+  try {
+    window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(auth));
+  } catch (error) {}
+}
+
+function clearAuth() {
+  try {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch (error) {}
+}
+
+function gasJsonp(action, params = {}) {
+  return new Promise((resolve, reject) => {
+    const callbackName = `kbclean_cb_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Apps Script 응답 시간이 초과되었습니다. 배포 URL과 권한을 확인해주세요."));
+    }, 15000);
+
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      try { delete window[callbackName]; } catch (error) { window[callbackName] = undefined; }
+      const el = document.getElementById(callbackName);
+      if (el) el.remove();
+    };
+
+    window[callbackName] = (data) => {
+      cleanup();
+      resolve(data);
+    };
+
+    const search = new URLSearchParams({
+      action,
+      callback: callbackName,
+      ...params,
+    });
+
+    const script = document.createElement("script");
+    script.id = callbackName;
+    script.src = `${GAS_WEBAPP_URL}?${search.toString()}`;
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("Apps Script 호출에 실패했습니다. 웹앱 URL 또는 재배포 상태를 확인해주세요."));
+    };
+    document.body.appendChild(script);
+  });
+}
+
+async function loginWithGas({ loginId, password, expectedRole }) {
+  const data = await gasJsonp("login", { loginId, password });
+  if (!data?.ok) throw new Error(data?.error || "로그인에 실패했습니다.");
+  if (expectedRole && data.role !== expectedRole) {
+    throw new Error(`${roleLabel(expectedRole)} 계정으로 로그인해주세요. 현재 계정은 ${roleLabel(data.role)} 계정입니다.`);
+  }
+  return data;
+}
+
+async function validateSavedToken(token) {
+  if (!token) return null;
+  const data = await gasJsonp("validate", { token });
+  if (!data?.ok) throw new Error(data?.error || "자동로그인 검증에 실패했습니다.");
+  return data;
+}
 
 async function submitDailyReport(payload) {
   // v6 FINAL: hidden form POST 방식
@@ -570,17 +671,320 @@ function Stepper({ step, total }) {
    ───────────────────────────────────────────── */
 export default function App() {
   useInjectFont();
-  const [role, setRole] = useState(null);
+  const [session, setSession] = useState(() => safeReadAuth());
+  const [loginRole, setLoginRole] = useState(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    const saved = safeReadAuth();
+    if (!saved?.token) {
+      setCheckingAuth(false);
+      return;
+    }
+
+    validateSavedToken(saved.token)
+      .then((data) => {
+        if (!alive) return;
+        const next = {
+          ...saved,
+          ...data,
+          token: saved.token,
+          appRole: appRoleFromAccountRole(data.role),
+        };
+        saveAuth(next);
+        setSession(next);
+      })
+      .catch(() => {
+        clearAuth();
+        if (alive) setSession(null);
+      })
+      .finally(() => {
+        if (alive) setCheckingAuth(false);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const handlePickRole = (appRole) => {
+    setLoginRole(accountRoleFromAppRole(appRole));
+  };
+
+  const handleLoginSuccess = (data) => {
+    const next = {
+      ...data,
+      appRole: appRoleFromAccountRole(data.role),
+      savedAt: new Date().toISOString(),
+    };
+    saveAuth(next);
+    setSession(next);
+    setLoginRole(null);
+  };
+
+  const handleLogout = () => {
+    clearAuth();
+    setSession(null);
+    setLoginRole(null);
+  };
+
+  const role = session?.appRole;
 
   return (
     <div
       style={{ background: KB.bg, fontFamily: fontStack, color: KB.ink }}
       className="min-h-screen"
     >
-      {!role && <RoleHome onPick={setRole} />}
-      {role === "work" && <WorkerApp onExit={() => setRole(null)} />}
-      {role === "hospital" && <HospitalApp onExit={() => setRole(null)} />}
-      {role === "admin" && <AdminPlaceholder onExit={() => setRole(null)} />}
+      {checkingAuth && <AuthChecking />}
+      {!checkingAuth && !session && !loginRole && <RoleHome onPick={handlePickRole} />}
+      {!checkingAuth && !session && loginRole && (
+        <LoginScreen
+          role={loginRole}
+          onBack={() => setLoginRole(null)}
+          onSuccess={handleLoginSuccess}
+        />
+      )}
+      {!checkingAuth && session && role === "work" && (
+        <WorkerApp authUser={session} onExit={handleLogout} />
+      )}
+      {!checkingAuth && session && role === "hospital" && (
+        <HospitalApp authUser={session} onExit={handleLogout} />
+      )}
+      {!checkingAuth && session && role === "admin" && (
+        <AdminPlaceholder authUser={session} onExit={handleLogout} />
+      )}
+    </div>
+  );
+}
+
+function AuthChecking() {
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6">
+      <div className="max-w-sm w-full text-center">
+        <Brand size="lg" />
+        <div
+          style={{ background: "#fff", border: `1px solid ${KB.line}` }}
+          className="mt-6 rounded-2xl p-6 shadow-sm"
+        >
+          <div
+            style={{ background: KB.goldMute }}
+            className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center"
+          >
+            <ShieldCheck size={28} color={KB.navy} />
+          </div>
+          <h2 className="mt-4 text-xl font-black" style={{ color: KB.navy }}>
+            자동로그인 확인 중
+          </h2>
+          <p className="mt-2 text-sm" style={{ color: KB.inkSoft }}>
+            저장된 로그인 정보를 Apps Script에서 확인하고 있습니다.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoginScreen({ role, onBack, onSuccess }) {
+  const meta = {
+    worker: {
+      icon: UserRound,
+      tag: "STAFF LOGIN",
+      title: "직원 로그인",
+      desc: "배정된 병원만 선택해서 작업 보고를 시작합니다.",
+      sampleId: "jiyong",
+      samplePw: "1111",
+      accent: KB.navy,
+    },
+    hospital: {
+      icon: Hospital,
+      tag: "HOSPITAL LOGIN",
+      title: "병원 로그인",
+      desc: "요청 등록과 월간 리포트를 확인합니다.",
+      sampleId: "retu",
+      samplePw: "retu2026",
+      accent: KB.gold,
+    },
+    admin: {
+      icon: ShieldCheck,
+      tag: "ADMIN LOGIN",
+      title: "관리자 로그인",
+      desc: "계정·현장·보고서 운영을 관리합니다.",
+      sampleId: "admin",
+      samplePw: "admin2026",
+      accent: KB.inkSoft,
+    },
+  }[role];
+
+  const Icon = meta.icon;
+  const [loginId, setLoginId] = useState("");
+  const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const fillSample = () => {
+    setLoginId(meta.sampleId);
+    setPassword(meta.samplePw);
+    setError("");
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!loginId.trim() || !password) {
+      setError("아이디와 비밀번호를 모두 입력해주세요.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      const data = await loginWithGas({
+        loginId: loginId.trim(),
+        password,
+        expectedRole: role,
+      });
+      if (!remember) {
+        try { window.localStorage.removeItem(AUTH_STORAGE_KEY); } catch (e) {}
+      }
+      onSuccess(data);
+    } catch (err) {
+      setError(err.message || "로그인 중 오류가 발생했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <div
+        style={{
+          background: `linear-gradient(135deg, ${KB.navyDeep} 0%, ${KB.navy} 58%, ${KB.navyLight} 100%)`,
+        }}
+        className="px-6 pt-10 pb-8 text-white"
+      >
+        <div className="max-w-md mx-auto">
+          <button
+            onClick={onBack}
+            className="flex items-center gap-1 text-sm font-bold"
+            style={{ color: "#DDE3FF" }}
+          >
+            <ArrowLeft size={18} /> 역할 선택으로
+          </button>
+          <div className="mt-8">
+            <Brand size="lg" invert />
+            <div className="mt-8 flex items-center gap-3">
+              <div
+                style={{ background: `${meta.accent}22`, color: "#fff", border: `1px solid ${KB.goldLight}55` }}
+                className="w-13 h-13 rounded-2xl flex items-center justify-center"
+              >
+                <Icon size={26} />
+              </div>
+              <div>
+                <div
+                  className="text-[10px] font-black"
+                  style={{ color: KB.goldLight, letterSpacing: "0.18em" }}
+                >
+                  {meta.tag}
+                </div>
+                <h1 className="text-2xl font-black mt-1" style={{ letterSpacing: "-0.03em" }}>
+                  {meta.title}
+                </h1>
+              </div>
+            </div>
+            <p className="mt-3 text-sm" style={{ color: "#C9D1F2" }}>
+              {meta.desc}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-6 mt-5 pb-12 max-w-md mx-auto w-full">
+        <form
+          onSubmit={submit}
+          style={{ background: "#fff", border: `1px solid ${KB.line}` }}
+          className="rounded-2xl p-5 shadow-sm"
+        >
+          <label className="block">
+            <span className="text-[11px] font-black" style={{ color: KB.inkSoft, letterSpacing: "0.14em" }}>
+              아이디
+            </span>
+            <input
+              value={loginId}
+              onChange={(e) => setLoginId(e.target.value)}
+              placeholder="아이디 입력"
+              autoCapitalize="none"
+              style={{ borderColor: KB.line, color: KB.navy, fontFamily: fontStack }}
+              className="mt-2 w-full rounded-xl border px-4 py-3 text-base font-bold outline-none focus:ring-2 focus:ring-[#C9A961]"
+            />
+          </label>
+
+          <label className="block mt-4">
+            <span className="text-[11px] font-black" style={{ color: KB.inkSoft, letterSpacing: "0.14em" }}>
+              비밀번호
+            </span>
+            <input
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="비밀번호 입력"
+              type="password"
+              style={{ borderColor: KB.line, color: KB.navy, fontFamily: fontStack }}
+              className="mt-2 w-full rounded-xl border px-4 py-3 text-base font-bold outline-none focus:ring-2 focus:ring-[#C9A961]"
+            />
+          </label>
+
+          <button
+            type="button"
+            onClick={() => setRemember((v) => !v)}
+            className="mt-4 flex items-center gap-2 text-sm font-bold"
+            style={{ color: remember ? KB.navy : KB.inkMute }}
+          >
+            <span
+              style={{ background: remember ? KB.ok : "#fff", border: `2px solid ${remember ? KB.ok : KB.line}` }}
+              className="w-5 h-5 rounded-md flex items-center justify-center"
+            >
+              {remember && <Check size={13} color="#fff" strokeWidth={3} />}
+            </span>
+            이 기기에서 자동로그인
+          </button>
+
+          {error && (
+            <div
+              style={{ background: KB.badSoft, color: KB.bad }}
+              className="mt-4 rounded-xl p-3 text-sm font-bold"
+            >
+              {error}
+            </div>
+          )}
+
+          <div className="mt-6">
+            <BigButton icon={LogIn} disabled={loading}>
+              {loading ? "로그인 확인 중..." : "로그인"}
+            </BigButton>
+          </div>
+
+          <button
+            type="button"
+            onClick={fillSample}
+            className="w-full mt-3 text-sm font-black"
+            style={{ color: KB.gold }}
+          >
+            테스트 계정 자동 입력 ({meta.sampleId})
+          </button>
+        </form>
+
+        <div
+          style={{ background: KB.goldMute, border: `1px solid ${KB.goldLight}` }}
+          className="mt-4 rounded-xl p-3 text-xs"
+        >
+          <div className="font-black" style={{ color: "#8B6914" }}>
+            3단계 적용 내용
+          </div>
+          <div className="mt-1" style={{ color: KB.navy }}>
+            입력한 아이디/비밀번호를 Apps Script 로그인 API로 확인하고, 성공 시 토큰을 저장해 자동로그인합니다.
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -707,7 +1111,7 @@ function RoleCard({ icon: Icon, tag, title, desc, onClick, accent }) {
 /* ═════════════════════════════════════════════
    ▒▒ 직원 위저드 ▒▒
    ═════════════════════════════════════════════ */
-function WorkerApp({ onExit }) {
+function WorkerApp({ onExit, authUser }) {
   const [step, setStep] = useState(0);
   const TOTAL = 6;
 
@@ -752,7 +1156,7 @@ function WorkerApp({ onExit }) {
               style={{ color: KB.inkSoft }}
             >
               <ArrowLeft size={18} />
-              {step === 0 ? "역할 선택" : "이전"}
+              {step === 0 ? "로그아웃" : "이전"}
             </button>
             <div
               style={{ color: KB.inkMute, letterSpacing: "0.18em" }}
@@ -792,7 +1196,7 @@ function WorkerApp({ onExit }) {
               <StepNotes state={state} update={update} onNext={goNext} />
             )}
             {step === 5 && (
-              <StepSummary state={state} update={update} onNext={goNext} />
+              <StepSummary state={state} update={update} onNext={goNext} authUser={authUser} />
             )}
             {step === 6 && <StepDone state={state} onExit={onExit} />}
           </motion.div>
@@ -1623,7 +2027,7 @@ function VoiceButton({ state, update }) {
 }
 
 /* Step 5 — 요약 + 퇴근 */
-function StepSummary({ state, update, onNext }) {
+function StepSummary({ state, update, onNext, authUser }) {
   const [submitting, setSubmitting] = useState(false);
 
   const doneChecks = Object.values(state.checks).filter((c) => c.done).length;
@@ -1645,7 +2049,7 @@ function StepSummary({ state, update, onNext }) {
     update({ clockOutAt: t, submitStatus: "submitting", submitError: "" });
 
     try {
-      const payload = buildDailyReportPayload(finalState);
+      const payload = buildDailyReportPayload(finalState, authUser);
       const result = await submitDailyReport(payload);
       update({
         clockOutAt: t,
@@ -1915,7 +2319,7 @@ function StepDone({ state, onExit }) {
 /* ═════════════════════════════════════════════
    ▒▒ 병원 앱 ▒▒
    ═════════════════════════════════════════════ */
-function HospitalApp({ onExit }) {
+function HospitalApp({ onExit, authUser }) {
   const [tab, setTab] = useState("report"); // home, request, mine, report
 
   return (
@@ -1931,7 +2335,7 @@ function HospitalApp({ onExit }) {
             className="flex items-center gap-1 text-xs font-semibold"
             style={{ color: KB.inkSoft }}
           >
-            <ArrowLeft size={16} /> 역할
+            <ArrowLeft size={16} /> 로그아웃
           </button>
           <div className="text-center">
             <div
@@ -1941,7 +2345,7 @@ function HospitalApp({ onExit }) {
               HOSPITAL
             </div>
             <div className="text-sm font-black" style={{ color: KB.navy, letterSpacing: "-0.02em" }}>
-              리투의원
+              {authUser?.name || "리투의원"}
             </div>
           </div>
           <Brand size="md" />
@@ -2897,7 +3301,7 @@ function SectionHeader({ tag, title, right }) {
 /* ═════════════════════════════════════════════
    ▒▒ 관리자 (placeholder — 추후 별도 화면) ▒▒
    ═════════════════════════════════════════════ */
-function AdminPlaceholder({ onExit }) {
+function AdminPlaceholder({ onExit, authUser }) {
   return (
     <div className="min-h-screen flex flex-col">
       <header
@@ -2909,7 +3313,7 @@ function AdminPlaceholder({ onExit }) {
           className="flex items-center gap-1 text-xs font-semibold"
           style={{ color: KB.inkSoft }}
         >
-          <ArrowLeft size={16} /> 역할
+          <ArrowLeft size={16} /> 로그아웃
         </button>
         <Brand size="md" />
       </header>
